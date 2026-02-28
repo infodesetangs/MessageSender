@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>message expres</title>
+    <script src="https://cdn.ably.com/lib/ably.min-1.js"></script>
+    <style>
+        /* --- STYLE --- */
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', sans-serif; background-color: #dadbd3; height: 100vh; display: flex; align-items: center; justify-content: center; }
+        
+        .container { background: white; padding: 30px; border-radius: 10px; text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.2); width: 350px; }
+        .container input { width: 100%; padding: 10px; margin: 5px 0; border: 1px solid #ddd; border-radius: 5px; }
+        button { padding: 10px 15px; background: #25D366; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+
+        .app-container { width: 1000px; height: 90vh; background: #f0f2f5; display: flex; box-shadow: 0 10px 30px rgba(0,0,0,0.1); border-radius: 5px; overflow: hidden; }
+        
+        /* Sidebar */
+        .sidebar { width: 30%; background: white; border-right: 1px solid #ddd; display: flex; flex-direction: column; }
+        .user-header { padding: 10px; background: #ededed; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #ddd; }
+        .avatar { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; background: #ccc; }
+        .add-contact { padding: 10px; background: #f6f6f6; border-bottom: 1px solid #ddd; }
+        .add-contact input { width: 100%; padding: 8px; margin-bottom: 5px; border: 1px solid #ddd; border-radius: 5px; }
+        #contact-list { flex: 1; overflow-y: auto; list-style: none; }
+        #contact-list li { padding: 12px; border-bottom: 1px solid #f2f2f2; cursor: pointer; display: flex; align-items: center; gap: 10px; }
+        #contact-list li:hover { background: #f5f6f6; }
+
+        /* Chat Area */
+        .main-chat { width: 70%; display: flex; flex-direction: column; background: #e5ddd5; }
+        .chat-header { padding: 10px 15px; background: #ededed; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #ddd; min-height: 60px; }
+        .status-text { font-size: 12px; color: #075e54; font-weight: bold; }
+        #messages-container { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; }
+        
+        .input-area { padding: 10px; background: #f0f2f5; display: flex; gap: 10px; align-items: center; }
+        .input-area input { flex: 1; padding: 12px; border: none; border-radius: 20px; outline: none; }
+
+        /* Message Bubbles */
+        .msg { max-width: 70%; padding: 8px 12px; border-radius: 8px; margin-bottom: 5px; position: relative; box-shadow: 0 1px 1px rgba(0,0,0,0.1); font-size: 14px; }
+        .sent { background: #dcf8c6; align-self: flex-end; }
+        .received { background: white; align-self: flex-start; }
+        .msg-info { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; font-size: 10px; color: #888; }
+
+        .recording { background: #ff3b30 !important; animation: pulse 1s infinite; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+        audio { height: 35px; width: 180px; }
+    </style>
+</head>
+<body>
+
+    <div id="login-screen" class="container">
+        <h2>Créer ton Profil</h2>
+        <input type="text" id="user-name" placeholder="Ton Nom">
+        <input type="text" id="user-pic" placeholder="Lien photo (URL)">
+        <input type="number" id="phone" placeholder="Numéro (6 chiffres)">
+        <button onclick="login()">Rejoindre</button>
+    </div>
+
+    <div id="chat-app" class="app-container" style="display:none;">
+        <div class="sidebar">
+            <div class="user-header">
+                <img id="my-pic" class="avatar" src="" alt="">
+                <strong id="my-name-display"></strong>
+                <button onclick="logout()" style="margin-left:auto; background:red; font-size:10px; padding:5px;">Quitter</button>
+            </div>
+            <div class="add-contact">
+                <input type="number" id="contact-phone" placeholder="Ajouter par numéro">
+                <button onclick="addContact()" style="width:100%">+ Ajouter</button>
+            </div>
+            <ul id="contact-list"></ul>
+        </div>
+
+        <div class="main-chat">
+            <div class="chat-header">
+                <img id="active-avatar" class="avatar" style="display:none;">
+                <div>
+                    <div id="active-name">Sélectionnez un contact</div>
+                    <div id="typing-status" class="status-text"></div>
+                </div>
+            </div>
+            <div id="messages-container"></div>
+            <div class="input-area">
+                <input type="text" id="msg-input" placeholder="Message..." 
+                       oninput="sendPresence('écrit...')" 
+                       onkeypress="if(event.key==='Enter') sendMessage()">
+                <button id="record-btn" onclick="toggleRecord()" style="background:#007bff">🎤</button>
+                <button onclick="sendMessage()">Envoyer</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const ABLY_KEY = 'JviVJA.bz6wjQ:amaKKJL2Ix8INO3Op1zJf1cqmJDq2mhIxMBt3uatkYE';
+        let ably, myPhone, myName, myPic, currentChannel, mediaRecorder, typingTimer;
+        let activeContactNum = null;
+        let contacts = JSON.parse(localStorage.getItem('myContacts')) || [];
+
+        window.onload = () => {
+            const saved = localStorage.getItem('myProfile');
+            if (saved) {
+                const p = JSON.parse(saved);
+                document.getElementById('user-name').value = p.name;
+                document.getElementById('user-pic').value = p.pic;
+                document.getElementById('phone').value = p.phone;
+                autoLogin(p.phone, p.name, p.pic);
+            }
+        };
+
+        function login() {
+            const name = document.getElementById('user-name').value;
+            const pic = document.getElementById('user-pic').value || 'https://via.placeholder.com/150';
+            const phone = document.getElementById('phone').value;
+            if (name && phone.length === 6) {
+                localStorage.setItem('myProfile', JSON.stringify({name, pic, phone}));
+                autoLogin(phone, name, pic);
+            }
+        }
+
+        function autoLogin(phone, name, pic) {
+            myPhone = phone; myName = name; myPic = pic;
+            ably = new Ably.Realtime(ABLY_KEY);
+            document.getElementById('my-name-display').innerText = name;
+            document.getElementById('my-pic').src = pic;
+            document.getElementById('login-screen').style.display = 'none';
+            document.getElementById('chat-app').style.display = 'flex';
+            contacts.forEach(num => subscribeToChannel(num));
+            renderContacts();
+        }
+
+        function addContact() {
+            const num = document.getElementById('contact-phone').value;
+            if (num.length === 6 && num !== myPhone && !contacts.includes(num)) {
+                contacts.push(num);
+                localStorage.setItem('myContacts', JSON.stringify(contacts));
+                subscribeToChannel(num);
+                renderContacts();
+                document.getElementById('contact-phone').value = '';
+            }
+        }
+
+        function subscribeToChannel(num) {
+            const id = [myPhone, num].sort().join('-');
+            const chan = ably.channels.get(id);
+            chan.subscribe('msg', m => {
+                if(m.data.senderPhone !== myPhone) handleIncoming(m.data);
+            });
+            // Écoute du statut "en train d'écrire"
+            chan.subscribe('presence', p => {
+                if(p.data.phone === activeContactNum) {
+                    document.getElementById('typing-status').innerText = p.data.status;
+                    clearTimeout(typingTimer);
+                    typingTimer = setTimeout(() => document.getElementById('typing-status').innerText = '', 2000);
+                }
+            });
+        }
+
+        function sendPresence(status) {
+            if(currentChannel) currentChannel.publish('presence', {phone: myPhone, status: myName + " " + status});
+        }
+
+        function openChat(num) {
+            activeContactNum = num;
+            document.getElementById('active-name').innerText = "Contact " + num;
+            document.getElementById('active-avatar').style.display = 'block';
+            document.getElementById('messages-container').innerHTML = '';
+            const id = [myPhone, num].sort().join('-');
+            currentChannel = ably.channels.get(id);
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('msg-input');
+            if (input.value.trim() && currentChannel) {
+                const data = {
+                    senderPhone: myPhone, senderName: myName, senderPic: myPic,
+                    type: 'text', content: input.value,
+                    time: new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})
+                };
+                currentChannel.publish('msg', data);
+                displayMessage(data);
+                input.value = '';
+            }
+        }
+
+        async function toggleRecord() {
+            const btn = document.getElementById('record-btn');
+            if (!isRecording) {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                let chunks = [];
+                mediaRecorder.ondataavailable = e => chunks.push(e.data);
+                mediaRecorder.onstart = () => sendPresence('enregistre un vocal...');
+                mediaRecorder.onstop = () => {
+                    const blob = new Blob(chunks, { type: 'audio/webm' });
+                    const reader = new FileReader();
+                    reader.readAsDataURL(blob);
+                    reader.onloadend = () => {
+                        const data = {
+                            senderPhone: myPhone, senderName: myName, senderPic: myPic,
+                            type: 'audio', content: reader.result,
+                            time: new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})
+                        };
+                        currentChannel.publish('msg', data);
+                        displayMessage(data);
+                    };
+                    stream.getTracks().forEach(t => t.stop());
+                };
+                mediaRecorder.start();
+                isRecording = true; btn.classList.add('recording'); btn.innerText = "🛑";
+            } else {
+                mediaRecorder.stop(); isRecording = false; btn.classList.remove('recording'); btn.innerText = "🎤";
+            }
+        }
+
+        function displayMessage(data) {
+            const cont = document.getElementById('messages-container');
+            const isMe = data.senderPhone === myPhone;
+            const div = document.createElement('div');
+            div.className = `msg ${isMe ? 'sent' : 'received'}`;
+            
+            // Mise à jour de l'entête du chat si c'est le contact qui parle
+            if(!isMe) {
+                document.getElementById('active-name').innerText = data.senderName;
+                document.getElementById('active-avatar').src = data.senderPic;
+            }
+
+            if(data.type === 'audio') {
+                div.innerHTML = `<audio controls src="${data.content}"></audio>`;
+            } else {
+                div.innerHTML = `<div>${data.content}</div>`;
+            }
+            div.innerHTML += `<div class="msg-info"><span>${data.time}</span></div>`;
+            cont.appendChild(div);
+            cont.scrollTop = cont.scrollHeight;
+        }
+
+        function handleIncoming(data) {
+            if(activeContactNum === data.senderPhone) displayMessage(data);
+            else {
+                new Notification("Message de " + data.senderName, { body: data.content });
+                const audio = new Audio('https://actions.google.com/sounds/v1/notification_sounds/faded_notification.ogg');
+                audio.play();
+            }
+        }
+
+        function renderContacts() {
+            const list = document.getElementById('contact-list');
+            list.innerHTML = '';
+            contacts.forEach(num => {
+                let li = document.createElement('li');
+                li.innerHTML = `<span>👤</span> <strong>${num}</strong>`;
+                li.onclick = () => openChat(num);
+                list.appendChild(li);
+            });
+        }
+
+        function logout() { localStorage.clear(); location.reload(); }
+    </script>
+</body>
+</html>
